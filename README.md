@@ -1,2 +1,218 @@
 # AdaBoost
 Predict feedback score to improve patient response.
+
+```{r}
+NPSScoreData<-read.csv("C:/Users/Snehal Thakur/Desktop/IDS 572/Assignment 4/Train & Test data.csv")
+
+str(NPSScoreData)
+
+#Checking for Missing values
+library(mice)
+md.pattern(NPSScoreData)
+
+colSums(is.na(NPSScoreData))
+```
+```{r}
+#Chekcing for outliers
+boxplot.stats(NPSScoreData$MaritalStatus)
+boxplot.stats(NPSScoreData$AgeYrs)
+boxplot.stats(NPSScoreData$Sex)
+boxplot.stats(NPSScoreData$Sex)
+summary(NPSScoreData)
+```
+```{r}
+#There doesn't seem to be any signifcant outliers.
+
+#Remove column "Serial no."
+NPSScoreData<-NPSScoreData[,-1]
+
+#Remove column "admission date" and "discharge date" as they seem irrelevant
+#Remove column "state" as it seemed redundant in front of columns "Coutnry" and "state zone"
+NPSScoreData<-NPSScoreData[,-which(names(NPSScoreData)%in%c("AdmissionDate","DischargeDate","State"))]
+
+#separating data into training and test data
+set.seed(1234)
+index = sample(2, nrow(NPSScoreData), replace = T, prob = c(0.8,0.2))
+TrainData = NPSScoreData[index == 1, ]
+TestData = NPSScoreData[index == 2,]
+```
+```{r}
+#(part 4) What does quasi-deparation mean?
+#Quasi-complete separation in logistic regression happens when the outcome variable separates a predictor variable or a combination of predictor variables almost completely.
+
+#Checking to see if quasi separation orblem exists using "detect_separation"
+library(brglm2)
+
+npsScore_logReg<-glm(NPS_Status~.,data=TrainData,family=binomial("logit"),method = "detect_separation")
+npsScore_logReg
+#there are 18 variables which have MLE estimate of -inf and inf, which are identified as variables which cause quasi seperation
+```
+```{r}
+#The above result shows that there is separation in the data.
+
+#running Linear Regression to check the coefficients for each predictor. If these are very large numbers then those can lead to quasi separation.
+npsScore_LRModel<-glm(NPS_Status~.,data=TrainData,family=binomial)
+summary(npsScore_LRModel)
+#Upon examining the results of "detect_seperation" and linear fit together 6 variables have both infinite MLE and positive coefficients 
+#Removing these variables
+```
+```{r}
+TrainData_quasi<- TrainData[, -which(names(TrainData)%in%c( "MaritalStatus", "BedCategory", "Country", "STATEZONE", "CE_NPS"))]
+
+#for testData
+TestData_quasi<- TestData[, -which(names(TestData)%in%c( "MaritalStatus", "BedCategory", "Country", "STATEZONE", "CE_NPS"))]
+```
+```{r}
+str(TrainData_quasi)
+```
+```{r}
+#Converting numeric to ordinal values
+for (i in 7:41){
+  TrainData_quasi[,i]<-ordered(TrainData_quasi[,i],levels=1:4)
+}
+#repeating above for test data
+for (i in 7:41){
+  TestData_quasi[,i]<-ordered(TestData_quasi[,i],levels=1:4)
+}
+str(TrainData_quasi)
+```
+```{r}
+#(part 6) Apply step wise logistic regresiion for binary classification
+
+#Making default=1 and setting rest =0
+library(dplyr)
+binary_quasiTrain<-TrainData_quasi
+binary_quasiTrain$binary <- NA
+binary_quasiTrain<- binary_quasiTrain%>%mutate(binary= if_else(NPS_Status=="Detractor", 1,0))
+
+#remove NPS_Status variable
+binary_quasiTrain<-binary_quasiTrain[,-which(names(binary_quasiTrain)%in%c("NPS_Status"))]
+
+#repeating above steps for test data
+#Making default=1 and setting rest =0
+binary_quasiTest<-TestData_quasi
+binary_quasiTest $binary <- NA
+binary_quasiTest<- binary_quasiTest%>%mutate(binary= if_else(NPS_Status=="Detractor", 1,0))
+
+#remove NPS_Status variable
+binary_quasiTest<- binary_quasiTest[,-which(names(binary_quasiTest)%in%c("NPS_Status"))]
+
+str(binary_quasiTrain)
+```
+```{r}
+#Run logisitc regression on binary classification
+binary_quasiTrain$binary<-as.factor(binary_quasiTrain$binary)
+str(binary_quasiTrain)
+logRegModelForBinaryClass<-glm(binary_quasiTrain$binary~.,data = binary_quasiTrain,family =binomial(link="logit"))
+
+#Stepwise regression model
+library(tidyverse)
+library(caret)
+library(leaps)
+library(MASS)
+stepwiseNPSScore<-stepAIC(logRegModelForBinaryClass,direction="both",trace=FALSE)
+summary(stepwiseNPSScore)
+```
+```{r}
+#Caluclating prediction power of the test data for logistic model
+library(caret)
+pred_testset<-predict(stepwiseNPSScore,newdata=binary_quasiTest,type="response")
+predicted.classes<-ifelse(pred_testset>0.5,1,0)
+
+observed.classes<-binary_quasiTest$binary
+binary_model<-table(predicted.classes,observed.classes)
+acc_binary_model<-sum(diag(binary_model))/sum(binary_model)*100
+acc_binary_model
+```
+```{r}
+#(part 7)
+#RANDOM FOREST
+library(randomForest)
+
+#RandomForest for binary classification 
+#using detractor as 1 vs 0 for other classes (just like in part 6)
+binaryClass_rndmfrst<-randomForest(binary_quasiTrain$binary~.,data=binary_quasiTrain,ntree=100,proximity=1,importance=T,mtry=10)
+print(binaryClass_rndmfrst)
+```
+```{r}
+#plot 
+plot(binaryClass_rndmfrst)
+legend("top", legend = colnames(binaryClass_rndmfrst$err.rate), cex = 0.5, lty = c(1,2,3), col = c(1,2,3), horiz = T)
+```
+```{r}
+#confusion matrix for test data
+library(caret)
+pred_testSet<-predict(binaryClass_rndmfrst,newdata=binary_quasiTest)
+binary_quasiTest$binary<-as.factor(binary_quasiTest$binary)
+confusionMatrix(pred_testSet,as.factor(binary_quasiTest$binary))
+```
+```{r}
+#RandomForest for multi class classification
+multiClass_rndmfrst<-randomForest(TrainData_quasi$NPS_Status~.,data=TrainData_quasi,ntree=100,proximity=1,importance=T,mtry=10)
+print(multiClass_rndmfrst)
+```
+```{r}
+#plot 
+plot(multiClass_rndmfrst)
+legend("top", legend = colnames(multiClass_rndmfrst$err.rate), cex = 0.5, lty = c(1,2,3), col = c(1,2,3), horiz = T)
+```
+```{r}
+#confusion matrix for test data
+library(caret)
+pred_multiClasstestSet<-predict(multiClass_rndmfrst,newdata=TestData_quasi)
+TestData_quasi$NPS_Status<-as.factor(TestData_quasi$NPS_Status)
+confusionMatrix(pred_multiClasstestSet,as.factor(TestData_quasi$NPS_Status))
+```
+```{r}
+levels(binary_quasiTrain$InsPayorcategory)<-levels(binary_quasiTrain$InsPayorcategory)
+levels(TrainData_quasi$InsPayorcategory)<-levels(TrainData_quasi$InsPayorcategory)
+
+#ADA BOOST
+
+#AdaBoost for multi class
+library(adabag)
+attach(TrainData_quasi)
+ada_boost_multi_cv <- boosting.cv(NPS_Status~.,data = TrainData_quasi, boos=TRUE, mfinal=10)
+ada_boost_multi_cv[-1]
+
+ada_boost_multiClass <- boosting(NPS_Status~.,data = TrainData_quasi, boos=TRUE, mfinal=50)
+importanceplot(ada_boost_multiClass)
+summary(ada_boost_multiClass)
+```
+```{r}
+#Checking prediction power for test data
+pred_mutliClass <- predict.boosting(ada_boost_multiClass,newdata= TestData_quasi, newmfinal=10)
+#confusion matrix
+pred_mutliClass$confusion
+```
+```{r}
+#accuracy score
+ada_multi_accuracy <- 1- pred_mutliClass$error
+ada_multi_accuracy
+detach(TrainData_quasi)
+```
+```{r}
+#AdaBoost for binary classification
+attach(binary_quasiTrain)
+ada_boost_binary_cv <- boosting.cv(binary~.,data = binary_quasiTrain, boos=TRUE, mfinal=10)
+ada_boost_binary_cv[-1]
+
+ada_boost_binaryClass <- boosting(binary~.,data = binary_quasiTrain, boos=TRUE, mfinal=50)
+importanceplot(ada_boost_binaryClass)
+summary(ada_boost_binaryClass)
+```
+```{r}
+#Checking prediction power for test data
+pred_binaryClass <- predict.boosting(ada_boost_binaryClass,newdata= binary_quasiTrain, newmfinal=10)
+#confusion matrix
+pred_binaryClass$confusion
+```
+```{r}
+#accuracy score
+ada_binary_accuracy <- 1- pred_binaryClass$error
+ada_binary_accuracy
+```
+```{r}
+#While comparing the results for running random forest on both multi class and binary class, we can say that the prediction power of the binary class (~92%) is more than that of multiclass (~70%).
+#Similary while comparing the results for running adaboost on both multi class and binary class, we can say that the prediction power of the binary class (~93%) is more than that of multiclass (~69%).
+```
